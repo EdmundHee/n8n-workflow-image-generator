@@ -435,11 +435,36 @@ async def render_workflows_async(
 
                 except Exception as e:
                     results["failed"] += 1
+
+                    # Capture detailed error information
+                    import traceback
+                    error_traceback = traceback.format_exc()
+
+                    error_details = {
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                        "node_count": len(workflow.workflow_data.get("nodes", [])),
+                        "has_connections": bool(workflow.workflow_data.get("connections")),
+                    }
+
                     status_entry["error"] = str(e)
+                    status_entry["error_details"] = error_details
+
                     results["errors"].append({
                         "workflow": workflow.name,
                         "error": str(e),
+                        "error_type": type(e).__name__,
+                        "node_count": error_details["node_count"],
+                        "traceback": error_traceback if logger.level <= logging.DEBUG else None,
                     })
+
+                    # Log detailed error
+                    logger.error(f"Failed to render {workflow.name}:")
+                    logger.error(f"  Error type: {type(e).__name__}")
+                    logger.error(f"  Message: {str(e)}")
+                    logger.error(f"  Nodes: {error_details['node_count']}")
+                    if logger.level <= logging.DEBUG:
+                        logger.debug(f"  Traceback:\n{error_traceback}")
 
                 finally:
                     # Add status entry to list

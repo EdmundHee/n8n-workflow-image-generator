@@ -191,29 +191,67 @@ class WorkflowRenderer:
             True if successful, False otherwise
         """
         page: Optional[Page] = None
+        console_logs = []
+
+        # Extract workflow metrics for error reporting
+        workflow_name = workflow_data.get('name', 'Unknown')
+        node_count = len(workflow_data.get('nodes', []))
 
         try:
             # Create new page
             page = await self._context.new_page()
 
+            # Capture console logs for debugging
+            page.on("console", lambda msg: console_logs.append(f"[{msg.type}] {msg.text}"))
+
+            # Capture page errors
+            page.on("pageerror", lambda exc: console_logs.append(f"[ERROR] {exc}"))
+
             # Encode workflow data for URL
             workflow_json = json.dumps(workflow_data)
-            encoded_workflow = quote(workflow_json)
 
-            # Navigate to renderer
-            render_url = f"{self.server_url}/render?workflow={encoded_workflow}"
-            if self.dark_mode:
-                render_url += "&dark=true"
+            # Use POST for large workflows to avoid HTTP 414 (URI Too Long)
+            # URL length limit is typically ~2000-8000 chars, use POST for >2000 chars
+            if len(workflow_json) > 2000:
+                logger.debug(f"Using POST method for large workflow ({len(workflow_json)} chars)")
 
-            # Pass viewport dimensions to set iframe size
-            render_url += f"&width={self.width}&height={self.height}"
+                # Navigate to the render endpoint first
+                await page.goto(f"{self.server_url}/render", wait_until="networkidle", timeout=self.timeout)
 
-            logger.debug(f"Navigating to: {self.server_url}/render")
-            await page.goto(render_url, wait_until="networkidle", timeout=self.timeout)
+                # Then use evaluate to make a POST request from the page
+                await page.evaluate("""
+                    async (payload) => {
+                        const response = await fetch('/render', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(payload)
+                        });
+                        const html = await response.text();
+                        document.open();
+                        document.write(html);
+                        document.close();
+                    }
+                """, {
+                    "workflow": workflow_data,
+                    "dark": self.dark_mode,
+                    "width": str(self.width),
+                    "height": str(self.height)
+                })
+            else:
+                # Use GET for small workflows (traditional URL approach)
+                encoded_workflow = quote(workflow_json)
+                render_url = f"{self.server_url}/render?workflow={encoded_workflow}"
+                if self.dark_mode:
+                    render_url += "&dark=true"
+                render_url += f"&width={self.width}&height={self.height}"
+
+                logger.debug(f"Using GET method ({len(workflow_json)} chars)")
+                logger.debug(f"Navigating to: {self.server_url}/render")
+                await page.goto(render_url, wait_until="networkidle", timeout=self.timeout)
 
             # Wait for n8n-demo component to be present
             logger.debug("Waiting for n8n-demo component")
-            await page.wait_for_selector("n8n-demo", state="attached", timeout=10000)
+            await page.wait_for_selector("n8n-demo", state="attached", timeout=self.timeout)
 
             # Critical: Wait for iframe to fully load and render
             # The workflow visualization happens in a cross-origin iframe
@@ -256,11 +294,54 @@ class WorkflowRenderer:
             return True
 
         except PlaywrightError as e:
+            error_details = {
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "workflow_name": workflow_name,
+                "node_count": node_count,
+                "timeout_used": self.timeout,
+                "wait_time": wait_time,
+            }
+
+            # Log detailed error
             logger.error(f"Playwright error during render: {e}")
+            logger.error(f"  Workflow: {workflow_name} ({node_count} nodes)")
+            logger.error(f"  Timeout: {self.timeout}ms, Wait time: {wait_time}ms")
+
+            # Log console output if available
+            if console_logs:
+                logger.error(f"  Browser console logs ({len(console_logs)} messages):")
+                for log in console_logs[-10:]:  # Last 10 messages
+                    logger.error(f"    {log}")
+
+            # Take error screenshot if page is available
+            if page:
+                try:
+                    error_screenshot_path = output_path.parent / f"{output_path.stem}_error.png"
+                    await page.screenshot(path=str(error_screenshot_path))
+                    logger.error(f"  Error screenshot saved: {error_screenshot_path}")
+                    error_details["error_screenshot"] = str(error_screenshot_path)
+                except Exception:
+                    pass  # Don't fail if screenshot fails
+
             raise
 
         except Exception as e:
+            error_details = {
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "workflow_name": workflow_name,
+                "node_count": node_count,
+            }
+
             logger.error(f"Unexpected error during render: {e}")
+            logger.error(f"  Workflow: {workflow_name} ({node_count} nodes)")
+
+            if console_logs:
+                logger.error(f"  Browser console logs ({len(console_logs)} messages):")
+                for log in console_logs[-10:]:
+                    logger.error(f"    {log}")
+
             raise
 
         finally:

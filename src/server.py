@@ -61,12 +61,18 @@ class WorkflowServer:
             """Health check endpoint."""
             return jsonify({"status": "ok", "message": "n8n-snap workflow renderer"})
 
-        @app.route("/render")
+        @app.route("/render", methods=["GET", "POST"])
         def render():
             """Render a workflow from JSON data.
 
-            Query Parameters:
+            GET Query Parameters:
                 workflow: URL-encoded JSON string of the workflow data
+                dark: Enable dark mode (optional, default: false)
+                width: Viewport width (optional)
+                height: Viewport height (optional)
+
+            POST JSON Body:
+                workflow: Workflow JSON object
                 dark: Enable dark mode (optional, default: false)
                 width: Viewport width (optional)
                 height: Viewport height (optional)
@@ -74,25 +80,47 @@ class WorkflowServer:
             Returns:
                 Rendered HTML page with n8n-demo component
             """
-            workflow_param = request.args.get("workflow", "")
-            dark_mode = request.args.get("dark", "false").lower() == "true"
-            width = request.args.get("width", "1920")
-            height = request.args.get("height", "1080")
+            # Support both GET (for small workflows) and POST (for large workflows)
+            if request.method == "POST":
+                # POST: workflow data in request body
+                data = request.get_json() or {}
+                workflow_data = data.get("workflow")
+                dark_mode = data.get("dark", False)
+                width = data.get("width", "1920")
+                height = data.get("height", "1080")
 
-            if not workflow_param:
-                logger.error("No workflow data provided")
-                return render_template(
-                    "workflow-renderer.html",
-                    workflow_json=None,
-                    dark_mode=False,
-                    width=width,
-                    height=height
-                ), 400
+                if not workflow_data:
+                    logger.error("No workflow data provided in POST body")
+                    return render_template(
+                        "workflow-renderer.html",
+                        workflow_json=None,
+                        dark_mode=False,
+                        width=width,
+                        height=height
+                    ), 400
 
-            try:
+                workflow_json_str = json.dumps(workflow_data) if isinstance(workflow_data, dict) else workflow_data
+            else:
+                # GET: workflow data in query parameter
+                workflow_param = request.args.get("workflow", "")
+                dark_mode = request.args.get("dark", "false").lower() == "true"
+                width = request.args.get("width", "1920")
+                height = request.args.get("height", "1080")
+
+                if not workflow_param:
+                    logger.error("No workflow data provided")
+                    return render_template(
+                        "workflow-renderer.html",
+                        workflow_json=None,
+                        dark_mode=False,
+                        width=width,
+                        height=height
+                    ), 400
+
                 # Decode URL-encoded JSON
                 workflow_json_str = unquote(workflow_param)
 
+            try:
                 # Validate JSON
                 workflow_data = json.loads(workflow_json_str)
 
