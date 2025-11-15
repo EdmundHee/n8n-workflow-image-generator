@@ -8,9 +8,9 @@ __version__ = "1.0.0"
 __author__ = "n8n Team"
 __license__ = "MIT"
 
-from n8n_snap.scanner import WorkflowScanner, WorkflowFile, scan_workflows
-from n8n_snap.renderer import WorkflowRenderer, create_renderer, render_workflow_file
-from n8n_snap.server import WorkflowServer, create_server
+from src.scanner import WorkflowScanner, WorkflowFile, scan_workflows
+from src.renderer import WorkflowRenderer, create_renderer, render_workflow_file
+from src.server import WorkflowServer, create_server
 
 __all__ = [
     # Version info

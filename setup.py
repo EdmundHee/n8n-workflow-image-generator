@@ -27,7 +27,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "n8n-snap=n8n_snap.cli:cli",
+            "n8n-snap=src.cli:cli",
         ],
     },
     python_requires=">=3.9",
@@ -45,7 +45,7 @@ setup(
     ],
     keywords="n8n workflow automation snapshot png playwright",
     package_data={
-        "n8n_snap": [
+        "src": [
             "templates/*.html",
             "static/*.js",
         ],

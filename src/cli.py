@@ -22,9 +22,9 @@ from rich.progress import (
 from rich.panel import Panel
 from rich.logging import RichHandler
 
-from n8n_snap.scanner import WorkflowScanner
-from n8n_snap.renderer import WorkflowRenderer
-from n8n_snap.server import create_server
+from src.scanner import WorkflowScanner
+from src.renderer import WorkflowRenderer
+from src.server import create_server
 
 # Initialize Rich console
 console = Console()
