@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>n8n Workflow Renderer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            {% if dark_mode %}
+            background-color: #1a1a1a;
+            {% else %}
+            background-color: white;
+            {% endif %}
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            overflow: hidden;
+        }
+
+        #workflow-container {
+            width: 100vw;
+            height: 100vh;
+            padding: 64px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            {% if dark_mode %}
+            background-color: #1a1a1a;
+            {% endif %}
+        }
+
+        n8n-demo {
+            display: block;
+            width: 100%;
+            height: 100%;
+            max-width: calc(100vw - 128px);
+            max-height: calc(100vh - 128px);
+        }
+
+        .error-message {
+            padding: 20px;
+            {% if dark_mode %}
+            color: #ff6b6b;
+            background-color: #2d1515;
+            border-left: 4px solid: #ff6b6b;
+            {% else %}
+            color: #d32f2f;
+            background-color: #ffebee;
+            border-left: 4px solid #d32f2f;
+            {% endif %}
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div id="workflow-container"></div>
+
+    <script type="module">
+        // Workflow data from server
+        const workflowData = {{ workflow_json | safe }};
+        const darkMode = {{ 'true' if dark_mode else 'false' }};
+
+        // Function to mount the workflow
+        async function mountWorkflow() {
+            if (!workflowData) {
+                console.error('No workflow data provided');
+                document.getElementById('workflow-container').innerHTML =
+                    '<div class="error-message">Error: No workflow data provided.</div>';
+                return;
+            }
+
+            try {
+                const container = document.getElementById('workflow-container');
+                if (!container) {
+                    console.error('Workflow container not found');
+                    return;
+                }
+
+                // Clear any existing content
+                container.innerHTML = '';
+
+                // Create n8n-demo element
+                const n8nDemo = document.createElement('n8n-demo');
+
+                // Set workflow data
+                n8nDemo.setAttribute('workflow', JSON.stringify(workflowData));
+                n8nDemo.setAttribute('readonly', 'true');
+                n8nDemo.setAttribute('hide-toolbar', 'true');
+                n8nDemo.setAttribute('theme', darkMode ? 'dark' : 'light');
+
+                // Apply styles with fixed dimensions
+                const width = {{ width }};
+                const height = {{ height }};
+                n8nDemo.style.width = width + 'px';
+                n8nDemo.style.height = height + 'px';
+                n8nDemo.style.display = 'block';
+
+                // Append to container
+                container.appendChild(n8nDemo);
+
+                // Force iframe to be square after it loads
+                setTimeout(() => {
+                    const demo = document.querySelector('n8n-demo');
+                    if (demo && demo.shadowRoot) {
+                        const iframe = demo.shadowRoot.querySelector('iframe');
+                        if (iframe) {
+                            iframe.style.width = width + 'px';
+                            iframe.style.height = height + 'px';
+                            console.log(`✅ Iframe resized to ${width}x${height}`);
+                        }
+                    }
+                }, 1000); // Wait for iframe to be created
+
+                console.log('✅ Workflow mounted:', workflowData.name);
+            } catch (error) {
+                console.error('Failed to mount workflow:', error.message);
+                document.getElementById('workflow-container').innerHTML =
+                    `<div class="error-message">Error: ${error.message}</div>`;
+            }
+        }
+
+        // Load n8n-demo component script
+        function loadN8nDemo() {
+            const script = document.createElement('script');
+            script.src = '/static/n8n-demo.bundled.js';
+            script.type = 'module';
+            script.onload = () => {
+                console.log('✅ n8n-demo component loaded');
+                mountWorkflow();
+            };
+            script.onerror = () => {
+                console.error('❌ Failed to load n8n-demo component');
+                document.getElementById('workflow-container').innerHTML =
+                    '<div class="error-message">Error: Failed to load n8n-demo component.</div>';
+            };
+            document.head.appendChild(script);
+        }
+
+        // Start loading on DOM ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', loadN8nDemo);
+        } else {
+            loadN8nDemo();
+        }
+    </script>
+</body>
+</html>

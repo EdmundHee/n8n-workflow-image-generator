@@ -1,0 +1,5 @@
+include README.md
+include LICENSE
+include requirements.txt
+recursive-include n8n_snap/templates *.html
+recursive-include n8n_snap/static *.js *.css
