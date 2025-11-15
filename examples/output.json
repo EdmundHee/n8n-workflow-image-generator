@@ -1,0 +1,45 @@
+{
+  "processing_info": {
+    "start_time": "2025-11-15T09:14:20.436090+00:00",
+    "end_time": "2025-11-15T09:14:51.093012+00:00",
+    "input_folder": "/Users/edmundhee/Work/GitHub/n8nspace/n8n-snap/examples",
+    "mode": "in-place",
+    "settings": {
+      "width": 1440,
+      "height": 1440,
+      "dark_mode": true
+    }
+  },
+  "summary": {
+    "total_workflows": 3,
+    "successful": 3,
+    "failed": 0,
+    "replaced_existing": 0
+  },
+  "workflows": [
+    {
+      "source_path": "simple-workflow/simple-workflow.json",
+      "output_path": "simple-workflow/simple-workflow.png",
+      "status": "success",
+      "error": null,
+      "timestamp": "2025-11-15T09:14:50.981578+00:00",
+      "replaced_existing": false
+    },
+    {
+      "source_path": "multi-node-workflow/multi-node-workflow.json",
+      "output_path": "multi-node-workflow/multi-node-workflow.png",
+      "status": "success",
+      "error": null,
+      "timestamp": "2025-11-15T09:14:50.981671+00:00",
+      "replaced_existing": false
+    },
+    {
+      "source_path": "real-workflow/real-workflow.json",
+      "output_path": "real-workflow/real-workflow.png",
+      "status": "success",
+      "error": null,
+      "timestamp": "2025-11-15T09:14:51.085146+00:00",
+      "replaced_existing": false
+    }
+  ]
+}

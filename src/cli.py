@@ -1,12 +1,14 @@
 """CLI interface for n8n-snap workflow snapshot generator."""
 
 import asyncio
+import json
 import logging
 import multiprocessing
 import os
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from functools import partial
@@ -32,8 +34,9 @@ from src.renderer import WorkflowRenderer
 from src.server import create_server
 from src.worker import render_workflow_worker, WorkflowTask, WorkflowResult
 
-# Initialize Rich console
+# Initialize Rich console and logger
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -164,11 +167,12 @@ def scan(input_folder: Path, recursive: bool, verbose: bool):
 
 @cli.command()
 @click.argument("input_folder", type=click.Path(exists=True, file_okay=False, path_type=Path))
-@click.argument("output_folder", type=click.Path(file_okay=False, path_type=Path))
+@click.argument("output_folder", type=click.Path(file_okay=False, path_type=Path), required=False)
 @click.option("--width", default=1920, type=int, help="Viewport width (default: 1920)")
 @click.option("--height", default=1080, type=int, help="Viewport height (default: 1080)")
 @click.option("--square", is_flag=True, help="Use square aspect ratio (2560x2560)")
 @click.option("--dark-mode", is_flag=True, help="Enable dark mode background")
+@click.option("--in-place", is_flag=True, help="Save images in same folder as source JSON files")
 @click.option("--timeout", default=30, type=int, help="Render timeout in seconds (default: 30)")
 @click.option("--wait-time", default=25, type=int, help="Wait time for iframe rendering in seconds (default: 25)")
 @click.option("--port", default=5000, type=int, help="Flask server port (default: 5000)")
@@ -176,11 +180,12 @@ def scan(input_folder: Path, recursive: bool, verbose: bool):
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 def generate(
     input_folder: Path,
-    output_folder: Path,
+    output_folder: Optional[Path],
     width: int,
     height: int,
     square: bool,
     dark_mode: bool,
+    in_place: bool,
     timeout: int,
     wait_time: int,
     port: int,
@@ -191,9 +196,18 @@ def generate(
 
     INPUT_FOLDER: Directory containing workflow JSON files
 
-    OUTPUT_FOLDER: Directory to save PNG snapshots
+    OUTPUT_FOLDER: Directory to save PNG snapshots (optional if --in-place is used)
     """
     setup_logging(verbose)
+
+    # Validate output_folder and in_place options
+    if in_place and output_folder:
+        console.print("[yellow]Warning: --in-place flag is set. The output_folder argument will be ignored.[/yellow]")
+        output_folder = None
+
+    if not in_place and not output_folder:
+        console.print("[red]Error: Either provide OUTPUT_FOLDER or use --in-place flag[/red]")
+        sys.exit(1)
 
     # Apply square dimensions if requested
     if square:
@@ -230,10 +244,16 @@ def generate(
     # Build worker description
     worker_mode = "single worker" if workers == 1 else f"{workers} parallel workers"
 
+    # Build output description
+    if in_place:
+        output_desc = f"Output: In-place (same folder as JSON files)\nStatus report: {input_folder}/output.json"
+    else:
+        output_desc = f"Output: {output_folder}"
+
     console.print(Panel.fit(
         f"[bold cyan]n8n Workflow Snapshot Generator[/bold cyan]\n"
         f"Input: {input_folder}\n"
-        f"Output: {output_folder}\n"
+        f"{output_desc}\n"
         f"{viewport_desc}\n"
         f"Mode: {worker_mode}",
         border_style="cyan"
@@ -270,6 +290,8 @@ def generate(
                     wait_time,
                     port,
                     dark_mode,
+                    in_place,
+                    input_folder,
                 )
             )
         else:
@@ -284,6 +306,8 @@ def generate(
                 port,
                 dark_mode,
                 workers,
+                in_place,
+                input_folder,
             )
 
     except KeyboardInterrupt:
@@ -298,28 +322,33 @@ def generate(
 
 async def render_workflows_async(
     workflows: list,
-    output_folder: Path,
+    output_folder: Optional[Path],
     width: int,
     height: int,
     timeout: int,
     wait_time: int,
     port: int,
     dark_mode: bool = False,
+    in_place: bool = False,
+    input_folder: Optional[Path] = None,
 ):
     """Async function to render workflows with progress tracking.
 
     Args:
         workflows: List of valid WorkflowFile objects
-        output_folder: Output directory path
+        output_folder: Output directory path (None if in_place mode)
         width: Viewport width
         height: Viewport height
         timeout: Timeout in seconds
         wait_time: Wait time for iframe in seconds
         port: Server port number
         dark_mode: Enable dark mode background
+        in_place: Save images in same folder as source JSON files
+        input_folder: Input folder path (required for in_place mode)
     """
-    # Create output folder
-    output_folder.mkdir(parents=True, exist_ok=True)
+    # Create output folder only if not in in_place mode
+    if not in_place and output_folder:
+        output_folder.mkdir(parents=True, exist_ok=True)
 
     # Initialize renderer
     renderer = WorkflowRenderer(
@@ -348,13 +377,27 @@ async def render_workflows_async(
                 total=len(workflows)
             )
 
+            # Initialize results and status tracking
+            start_time = datetime.now(timezone.utc)
             results = {
                 "successful": 0,
                 "failed": 0,
                 "errors": [],
+                "replaced_existing": 0,
             }
+            workflow_statuses = []
 
             for i, workflow in enumerate(workflows, 1):
+                workflow_start_time = datetime.now(timezone.utc)
+                status_entry = {
+                    "source_path": str(workflow.path.relative_to(input_folder)) if in_place else workflow.path.name,
+                    "output_path": None,
+                    "status": "failed",
+                    "error": None,
+                    "timestamp": workflow_start_time.isoformat(),
+                    "replaced_existing": False,
+                }
+
                 try:
                     # Update progress description
                     progress.update(
@@ -362,9 +405,23 @@ async def render_workflows_async(
                         description=f"[cyan]Rendering {workflow.name[:40]}...",
                     )
 
-                    # Generate output path
+                    # Generate output path based on mode
                     output_filename = f"{workflow.safe_filename}.png"
-                    output_path = output_folder / output_filename
+                    if in_place:
+                        # Save in same folder as source JSON
+                        output_path = workflow.path.parent / output_filename
+                        # Track relative path for status report
+                        status_entry["output_path"] = str(output_path.relative_to(input_folder))
+                    else:
+                        # Save in output folder
+                        output_path = output_folder / output_filename
+                        status_entry["output_path"] = output_filename
+
+                    # Check if file already exists
+                    if output_path.exists():
+                        results["replaced_existing"] += 1
+                        status_entry["replaced_existing"] = True
+                        logger.debug(f"Replacing existing image: {output_path}")
 
                     # Render workflow
                     await renderer.render_workflow(
@@ -374,21 +431,58 @@ async def render_workflows_async(
                     )
 
                     results["successful"] += 1
+                    status_entry["status"] = "success"
 
                 except Exception as e:
                     results["failed"] += 1
+                    status_entry["error"] = str(e)
                     results["errors"].append({
                         "workflow": workflow.name,
                         "error": str(e),
                     })
 
                 finally:
+                    # Add status entry to list
+                    workflow_statuses.append(status_entry)
                     # Update progress
                     progress.update(task, advance=1)
+
+        # Generate output.json if in_place mode
+        end_time = datetime.now(timezone.utc)
+        if in_place and input_folder:
+            status_report = {
+                "processing_info": {
+                    "start_time": start_time.isoformat(),
+                    "end_time": end_time.isoformat(),
+                    "input_folder": str(input_folder.absolute()),
+                    "mode": "in-place",
+                    "settings": {
+                        "width": width,
+                        "height": height,
+                        "dark_mode": dark_mode,
+                    }
+                },
+                "summary": {
+                    "total_workflows": len(workflows),
+                    "successful": results["successful"],
+                    "failed": results["failed"],
+                    "replaced_existing": results["replaced_existing"],
+                },
+                "workflows": workflow_statuses,
+            }
+
+            # Write status report to input folder
+            report_path = input_folder / "output.json"
+            with open(report_path, "w", encoding="utf-8") as f:
+                json.dump(status_report, f, indent=2)
+            logger.info(f"Status report written to: {report_path}")
 
         # Print results
         console.print("\n[bold]Results:[/bold]")
         console.print(f"  [green]✓ {results['successful']} workflows processed successfully[/green]")
+
+        if results["replaced_existing"] > 0:
+            console.print(f"  [yellow]⟳ {results['replaced_existing']} existing images replaced[/yellow]")
 
         if results["failed"] > 0:
             console.print(f"  [red]✗ {results['failed']} workflows failed[/red]")
@@ -397,7 +491,11 @@ async def render_workflows_async(
             for error in results["errors"]:
                 console.print(f"  [red]✗[/red] {error['workflow']}: {error['error']}")
 
-        console.print(f"\n[bold cyan]Output folder:[/bold cyan] {output_folder}")
+        if in_place:
+            console.print(f"\n[bold cyan]Output:[/bold cyan] Images saved in source folders")
+            console.print(f"[bold cyan]Status report:[/bold cyan] {input_folder}/output.json")
+        else:
+            console.print(f"\n[bold cyan]Output folder:[/bold cyan] {output_folder}")
 
     finally:
         await renderer.close()
@@ -405,7 +503,7 @@ async def render_workflows_async(
 
 def render_workflows_parallel(
     workflows: list,
-    output_folder: Path,
+    output_folder: Optional[Path],
     width: int,
     height: int,
     timeout: int,
@@ -413,12 +511,14 @@ def render_workflows_parallel(
     port: int,
     dark_mode: bool,
     workers: int,
+    in_place: bool = False,
+    input_folder: Optional[Path] = None,
 ):
     """Render workflows using parallel workers with resource monitoring.
 
     Args:
         workflows: List of valid WorkflowFile objects
-        output_folder: Output directory path
+        output_folder: Output directory path (None if in_place mode)
         width: Viewport width
         height: Viewport height
         timeout: Timeout in seconds
@@ -426,15 +526,26 @@ def render_workflows_parallel(
         port: Server port number
         dark_mode: Enable dark mode background
         workers: Number of parallel workers
+        in_place: Save images in same folder as source JSON files
+        input_folder: Input folder path (required for in_place mode)
     """
-    # Create output folder
-    output_folder.mkdir(parents=True, exist_ok=True)
+    # Create output folder only if not in in_place mode
+    if not in_place and output_folder:
+        output_folder.mkdir(parents=True, exist_ok=True)
 
     # Create tasks for all workflows
     tasks = []
+    workflow_paths = {}  # Track workflow paths for status reporting
     for workflow in workflows:
         output_filename = f"{workflow.safe_filename}.png"
-        output_path = output_folder / output_filename
+
+        # Generate output path based on mode
+        if in_place:
+            # Save in same folder as source JSON
+            output_path = workflow.path.parent / output_filename
+        else:
+            # Save in output folder
+            output_path = output_folder / output_filename
 
         task = WorkflowTask(
             workflow_data=workflow.workflow_data,
@@ -443,6 +554,12 @@ def render_workflows_parallel(
             output_path=output_path,
         )
         tasks.append(task)
+
+        # Store workflow path for status tracking
+        workflow_paths[workflow.name] = {
+            "source_path": workflow.path,
+            "output_path": output_path,
+        }
 
     # Prepare worker arguments
     server_url = f"http://127.0.0.1:{port}"
@@ -458,12 +575,15 @@ def render_workflows_parallel(
         dark_mode=dark_mode,
     )
 
-    # Initialize results
+    # Initialize results and status tracking
+    start_time = datetime.now(timezone.utc)
     results = {
         "successful": 0,
         "failed": 0,
         "errors": [],
+        "replaced_existing": 0,
     }
+    workflow_statuses = []
 
     # Track worker statuses
     worker_status = {i: {"workflow": None, "status": "idle"} for i in range(workers)}
@@ -562,6 +682,20 @@ def render_workflows_parallel(
                             # Get worker info for this task
                             worker_id, workflow_name = task_to_worker.get(id(async_result), (None, None))
 
+                            # Prepare status entry
+                            workflow_info = workflow_paths.get(result.workflow_name, {})
+                            source_path = workflow_info.get("source_path", Path())
+                            output_path = workflow_info.get("output_path", Path())
+
+                            status_entry = {
+                                "source_path": str(source_path.relative_to(input_folder)) if in_place and input_folder else source_path.name,
+                                "output_path": str(output_path.relative_to(input_folder)) if in_place and input_folder else output_path.name,
+                                "status": "success" if result.success else "failed",
+                                "error": None if result.success else (result.error or "Unknown error"),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "replaced_existing": output_path.exists() if not result.success else False,  # Will be set properly later
+                            }
+
                             # Update results
                             if result.success:
                                 results["successful"] += 1
@@ -571,6 +705,9 @@ def render_workflows_parallel(
                                     "workflow": result.workflow_name,
                                     "error": result.error or "Unknown error",
                                 })
+
+                            # Add status entry
+                            workflow_statuses.append(status_entry)
 
                             # Update worker status
                             if worker_id is not None:
@@ -596,9 +733,42 @@ def render_workflows_parallel(
                         live.update(make_display())
                         time.sleep(0.1)
 
+        # Generate output.json if in_place mode
+        end_time = datetime.now(timezone.utc)
+        if in_place and input_folder:
+            status_report = {
+                "processing_info": {
+                    "start_time": start_time.isoformat(),
+                    "end_time": end_time.isoformat(),
+                    "input_folder": str(input_folder.absolute()),
+                    "mode": "in-place",
+                    "settings": {
+                        "width": width,
+                        "height": height,
+                        "dark_mode": dark_mode,
+                    }
+                },
+                "summary": {
+                    "total_workflows": len(workflows),
+                    "successful": results["successful"],
+                    "failed": results["failed"],
+                    "replaced_existing": results["replaced_existing"],
+                },
+                "workflows": workflow_statuses,
+            }
+
+            # Write status report to input folder
+            report_path = input_folder / "output.json"
+            with open(report_path, "w", encoding="utf-8") as f:
+                json.dump(status_report, f, indent=2)
+            logger.info(f"Status report written to: {report_path}")
+
         # Print results
         console.print("\n[bold]Results:[/bold]")
         console.print(f"  [green]✓ {results['successful']} workflows processed successfully[/green]")
+
+        if results["replaced_existing"] > 0:
+            console.print(f"  [yellow]⟳ {results['replaced_existing']} existing images replaced[/yellow]")
 
         if results["failed"] > 0:
             console.print(f"  [red]✗ {results['failed']} workflows failed[/red]")
@@ -607,7 +777,11 @@ def render_workflows_parallel(
             for error in results["errors"]:
                 console.print(f"  [red]✗[/red] {error['workflow']}: {error['error']}")
 
-        console.print(f"\n[bold cyan]Output folder:[/bold cyan] {output_folder}")
+        if in_place:
+            console.print(f"\n[bold cyan]Output:[/bold cyan] Images saved in source folders")
+            console.print(f"[bold cyan]Status report:[/bold cyan] {input_folder}/output.json")
+        else:
+            console.print(f"\n[bold cyan]Output folder:[/bold cyan] {output_folder}")
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user - cleaning up workers...[/yellow]")

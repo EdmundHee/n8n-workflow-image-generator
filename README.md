@@ -9,6 +9,8 @@ Generate high-quality PNG snapshots of n8n workflows using Python and Playwright
 - **High Quality** - 2x retina resolution for crisp images
 - **Iframe-only Capture** - Clean workflow screenshots without page chrome
 - **Batch Processing** - Process multiple workflows at once
+- **In-Place Mode** - Save images alongside source JSON files with status tracking
+- **Parallel Processing** - Multi-worker support for faster batch rendering
 - **CLI-first** - Simple command-line interface for automation
 
 ## Prerequisites
@@ -81,6 +83,9 @@ n8n-snap scan examples/
 # Generate snapshots (default: 1920×1080, light mode)
 n8n-snap generate examples/ output/
 
+# Generate in-place (images saved alongside JSON files)
+n8n-snap generate examples/ --in-place
+
 # Square format with dark mode
 n8n-snap generate examples/ output/ --square --dark-mode
 ```
@@ -106,17 +111,21 @@ n8n-snap scan <input_folder>
 Generate PNG snapshots from workflows:
 
 ```bash
-n8n-snap generate <input_folder> <output_folder> [OPTIONS]
+n8n-snap generate <input_folder> [output_folder] [OPTIONS]
 
 # Options:
 #   --width INTEGER       Viewport width (default: 1920)
 #   --height INTEGER      Viewport height (default: 1080)
 #   --square             Use square aspect ratio (2560×2560)
 #   --dark-mode          Enable dark theme
+#   --in-place           Save images in same folder as source JSON files
 #   --timeout INTEGER    Render timeout in seconds (default: 30)
 #   --wait-time INTEGER  Wait time for iframe (default: 25)
 #   --port INTEGER       Flask server port (default: 5000)
+#   --workers INTEGER    Number of parallel workers (default: 1)
 #   -v, --verbose        Enable verbose logging
+
+# Note: output_folder is optional if --in-place is used
 ```
 
 #### `preview` - Preview Single Workflow
@@ -183,6 +192,63 @@ n8n-snap generate workflows/ output/ --width 3840 --height 2160 --dark-mode
 # Show detailed logs for debugging
 n8n-snap generate workflows/ output/ --square --dark-mode --verbose
 ```
+
+#### In-Place Mode
+
+Save images directly alongside their source JSON files with automatic status tracking:
+
+```bash
+# Basic in-place mode - images saved in same folder as JSON files
+n8n-snap generate workflows/ --in-place
+
+# In-place with dark mode and square format
+n8n-snap generate workflows/ --in-place --dark-mode --square
+
+# In-place with parallel workers for faster processing
+n8n-snap generate workflows/ --in-place --workers 4
+```
+
+**What happens:**
+- PNG images are created in the same directory as their source JSON files
+- A status report (`output.json`) is generated at the root of the input folder
+- Works seamlessly with nested folder structures
+- Existing images are automatically replaced
+
+**Example folder structure:**
+```
+workflows/
+├── team-a/
+│   ├── workflow1.json
+│   └── workflow1.png          ← Generated here
+├── team-b/
+│   └── nested/
+│       ├── workflow2.json
+│       └── workflow2.png      ← Generated here
+└── output.json                ← Status report
+```
+
+**Status Report (`output.json`):**
+- Processing timestamps (start/end)
+- Summary statistics (total, successful, failed, replaced)
+- Per-workflow details (source path, output path, status, errors)
+- Render settings used (dimensions, dark mode, etc.)
+
+#### Parallel Processing
+
+Process multiple workflows simultaneously for faster batch rendering:
+
+```bash
+# Use 4 parallel workers
+n8n-snap generate workflows/ output/ --workers 4
+
+# Combine with in-place mode
+n8n-snap generate workflows/ --in-place --workers 4 --dark-mode
+```
+
+**Performance notes:**
+- Each worker uses ~400MB memory
+- Recommended: Number of CPU cores or less
+- Best for large batches (10+ workflows)
 
 ## Output
 
@@ -303,7 +369,9 @@ n8n-snap --help
 
 - **Processing Time**: ~25 seconds per workflow (iframe rendering)
 - **Memory Usage**: ~200-400 MB per browser instance
-- **Processing Mode**: Sequential (one workflow at a time)
+- **Processing Mode**: Sequential (single worker) or parallel (multiple workers)
+- **Parallel Workers**: Configurable via `--workers` flag (1-CPU count)
+- **Throughput**: Scales linearly with worker count for batch processing
 
 ## Technical Details
 
@@ -319,7 +387,6 @@ n8n-snap --help
 
 - Requires internet connection (n8n cloud rendering service)
 - ~25 second minimum render time per workflow
-- Sequential processing only
 - Light and dark themes supported (via n8n-demo component)
 
 ## License
