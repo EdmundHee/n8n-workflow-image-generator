@@ -39,6 +39,29 @@ console = Console()
 logger = logging.getLogger(__name__)
 
 
+def load_existing_state(input_folder: Path) -> dict:
+    """Load existing state from n8n-snap-job.json if it exists.
+
+    Args:
+        input_folder: Path to the input folder
+
+    Returns:
+        Dictionary containing existing state or empty dict if no state exists
+    """
+    state_file = input_folder / "n8n-snap-job.json"
+    if not state_file.exists():
+        return {}
+
+    try:
+        with open(state_file, "r", encoding="utf-8") as f:
+            state = json.load(f)
+            logger.info(f"Loaded existing state from {state_file}")
+            return state
+    except Exception as e:
+        logger.warning(f"Failed to load existing state from {state_file}: {e}")
+        return {}
+
+
 def setup_logging(verbose: bool = False) -> None:
     """Configure logging with Rich handler.
 
@@ -173,6 +196,7 @@ def scan(input_folder: Path, recursive: bool, verbose: bool):
 @click.option("--square", is_flag=True, help="Use square aspect ratio (2560x2560)")
 @click.option("--dark-mode", is_flag=True, help="Enable dark mode background")
 @click.option("--in-place", is_flag=True, help="Save images in same folder as source JSON files")
+@click.option("--force", is_flag=True, help="Force re-render of all workflows, ignoring previous state")
 @click.option("--timeout", default=30, type=int, help="Render timeout in seconds (default: 30)")
 @click.option("--wait-time", default=25, type=int, help="Wait time for iframe rendering in seconds (default: 25)")
 @click.option("--port", default=5000, type=int, help="Flask server port (default: 5000)")
@@ -186,6 +210,7 @@ def generate(
     square: bool,
     dark_mode: bool,
     in_place: bool,
+    force: bool,
     timeout: int,
     wait_time: int,
     port: int,
@@ -246,7 +271,7 @@ def generate(
 
     # Build output description
     if in_place:
-        output_desc = f"Output: In-place (same folder as JSON files)\nStatus report: {input_folder}/output.json"
+        output_desc = f"Output: In-place (same folder as JSON files)\nStatus report: {input_folder}/n8n-snap-job.json"
     else:
         output_desc = f"Output: {output_folder}"
 
@@ -292,6 +317,7 @@ def generate(
                     dark_mode,
                     in_place,
                     input_folder,
+                    force,
                 )
             )
         else:
@@ -308,6 +334,7 @@ def generate(
                 workers,
                 in_place,
                 input_folder,
+                force,
             )
 
     except KeyboardInterrupt:
@@ -331,6 +358,7 @@ async def render_workflows_async(
     dark_mode: bool = False,
     in_place: bool = False,
     input_folder: Optional[Path] = None,
+    force: bool = False,
 ):
     """Async function to render workflows with progress tracking.
 
@@ -345,7 +373,38 @@ async def render_workflows_async(
         dark_mode: Enable dark mode background
         in_place: Save images in same folder as source JSON files
         input_folder: Input folder path (required for in_place mode)
+        force: Force re-render of all workflows, ignoring previous state
     """
+    # Load existing state if in_place mode and not forcing
+    existing_state = {}
+    previously_successful = {}
+    if in_place and input_folder and not force:
+        existing_state = load_existing_state(input_folder)
+        # Build a map of successfully processed workflows by source_path
+        if "workflows" in existing_state:
+            for workflow_entry in existing_state["workflows"]:
+                if workflow_entry.get("status") == "success":
+                    previously_successful[workflow_entry["source_path"]] = workflow_entry
+
+    # Filter out already processed workflows (unless force is enabled)
+    original_count = len(workflows)
+    workflows_to_process = []
+    for workflow in workflows:
+        source_path = str(workflow.path.relative_to(input_folder)) if in_place and input_folder else workflow.path.name
+        if not force and source_path in previously_successful:
+            logger.info(f"Skipping already processed workflow: {source_path}")
+        else:
+            workflows_to_process.append(workflow)
+
+    if workflows_to_process:
+        skipped_count = original_count - len(workflows_to_process)
+        if skipped_count > 0:
+            console.print(f"[yellow]Skipping {skipped_count} already processed workflow(s)[/yellow]")
+        console.print(f"Processing {len(workflows_to_process)} workflow(s)\n")
+    else:
+        console.print("[green]All workflows have already been processed successfully![/green]")
+        return
+
     # Create output folder only if not in in_place mode
     if not in_place and output_folder:
         output_folder.mkdir(parents=True, exist_ok=True)
@@ -374,7 +433,7 @@ async def render_workflows_async(
 
             task = progress.add_task(
                 "[cyan]Rendering workflows...",
-                total=len(workflows)
+                total=len(workflows_to_process)
             )
 
             # Initialize results and status tracking
@@ -387,7 +446,7 @@ async def render_workflows_async(
             }
             workflow_statuses = []
 
-            for i, workflow in enumerate(workflows, 1):
+            for i, workflow in enumerate(workflows_to_process, 1):
                 workflow_start_time = datetime.now(timezone.utc)
                 status_entry = {
                     "source_path": str(workflow.path.relative_to(input_folder)) if in_place else workflow.path.name,
@@ -472,12 +531,20 @@ async def render_workflows_async(
                     # Update progress
                     progress.update(task, advance=1)
 
-        # Generate output.json if in_place mode
+        # Generate n8n-snap-job.json if in_place mode
         end_time = datetime.now(timezone.utc)
         if in_place and input_folder:
+            # Merge old successful workflows with new results
+            all_workflows = list(previously_successful.values()) + workflow_statuses
+
+            # Calculate totals
+            total_successful = len([w for w in all_workflows if w.get("status") == "success"])
+            total_failed = len([w for w in all_workflows if w.get("status") == "failed"])
+            total_replaced = results["replaced_existing"]
+
             status_report = {
                 "processing_info": {
-                    "start_time": start_time.isoformat(),
+                    "start_time": existing_state.get("processing_info", {}).get("start_time", start_time.isoformat()),
                     "end_time": end_time.isoformat(),
                     "input_folder": str(input_folder.absolute()),
                     "mode": "in-place",
@@ -489,15 +556,15 @@ async def render_workflows_async(
                 },
                 "summary": {
                     "total_workflows": len(workflows),
-                    "successful": results["successful"],
-                    "failed": results["failed"],
-                    "replaced_existing": results["replaced_existing"],
+                    "successful": total_successful,
+                    "failed": total_failed,
+                    "replaced_existing": total_replaced,
                 },
-                "workflows": workflow_statuses,
+                "workflows": all_workflows,
             }
 
             # Write status report to input folder
-            report_path = input_folder / "output.json"
+            report_path = input_folder / "n8n-snap-job.json"
             with open(report_path, "w", encoding="utf-8") as f:
                 json.dump(status_report, f, indent=2)
             logger.info(f"Status report written to: {report_path}")
@@ -518,7 +585,7 @@ async def render_workflows_async(
 
         if in_place:
             console.print(f"\n[bold cyan]Output:[/bold cyan] Images saved in source folders")
-            console.print(f"[bold cyan]Status report:[/bold cyan] {input_folder}/output.json")
+            console.print(f"[bold cyan]Status report:[/bold cyan] {input_folder}/n8n-snap-job.json")
         else:
             console.print(f"\n[bold cyan]Output folder:[/bold cyan] {output_folder}")
 
@@ -538,6 +605,7 @@ def render_workflows_parallel(
     workers: int,
     in_place: bool = False,
     input_folder: Optional[Path] = None,
+    force: bool = False,
 ):
     """Render workflows using parallel workers with resource monitoring.
 
@@ -553,7 +621,38 @@ def render_workflows_parallel(
         workers: Number of parallel workers
         in_place: Save images in same folder as source JSON files
         input_folder: Input folder path (required for in_place mode)
+        force: Force re-render of all workflows, ignoring previous state
     """
+    # Load existing state if in_place mode and not forcing
+    existing_state = {}
+    previously_successful = {}
+    if in_place and input_folder and not force:
+        existing_state = load_existing_state(input_folder)
+        # Build a map of successfully processed workflows by source_path
+        if "workflows" in existing_state:
+            for workflow_entry in existing_state["workflows"]:
+                if workflow_entry.get("status") == "success":
+                    previously_successful[workflow_entry["source_path"]] = workflow_entry
+
+    # Filter out already processed workflows (unless force is enabled)
+    original_count = len(workflows)
+    workflows_to_process = []
+    for workflow in workflows:
+        source_path = str(workflow.path.relative_to(input_folder)) if in_place and input_folder else workflow.path.name
+        if not force and source_path in previously_successful:
+            logger.info(f"Skipping already processed workflow: {source_path}")
+        else:
+            workflows_to_process.append(workflow)
+
+    if workflows_to_process:
+        skipped_count = original_count - len(workflows_to_process)
+        if skipped_count > 0:
+            console.print(f"[yellow]Skipping {skipped_count} already processed workflow(s)[/yellow]")
+        console.print(f"Processing {len(workflows_to_process)} workflow(s)\n")
+    else:
+        console.print("[green]All workflows have already been processed successfully![/green]")
+        return
+
     # Create output folder only if not in in_place mode
     if not in_place and output_folder:
         output_folder.mkdir(parents=True, exist_ok=True)
@@ -561,7 +660,7 @@ def render_workflows_parallel(
     # Create tasks for all workflows
     tasks = []
     workflow_paths = {}  # Track workflow paths for status reporting
-    for workflow in workflows:
+    for workflow in workflows_to_process:
         output_filename = f"{workflow.safe_filename}.png"
 
         # Generate output path based on mode
@@ -628,7 +727,7 @@ def render_workflows_parallel(
 
         task = progress.add_task(
             "[cyan]Rendering workflows...",
-            total=len(workflows)
+            total=len(workflows_to_process)
         )
 
         # Create grouped display (worker status + progress)
@@ -758,12 +857,20 @@ def render_workflows_parallel(
                         live.update(make_display())
                         time.sleep(0.1)
 
-        # Generate output.json if in_place mode
+        # Generate n8n-snap-job.json if in_place mode
         end_time = datetime.now(timezone.utc)
         if in_place and input_folder:
+            # Merge old successful workflows with new results
+            all_workflows = list(previously_successful.values()) + workflow_statuses
+
+            # Calculate totals
+            total_successful = len([w for w in all_workflows if w.get("status") == "success"])
+            total_failed = len([w for w in all_workflows if w.get("status") == "failed"])
+            total_replaced = results["replaced_existing"]
+
             status_report = {
                 "processing_info": {
-                    "start_time": start_time.isoformat(),
+                    "start_time": existing_state.get("processing_info", {}).get("start_time", start_time.isoformat()),
                     "end_time": end_time.isoformat(),
                     "input_folder": str(input_folder.absolute()),
                     "mode": "in-place",
@@ -775,15 +882,15 @@ def render_workflows_parallel(
                 },
                 "summary": {
                     "total_workflows": len(workflows),
-                    "successful": results["successful"],
-                    "failed": results["failed"],
-                    "replaced_existing": results["replaced_existing"],
+                    "successful": total_successful,
+                    "failed": total_failed,
+                    "replaced_existing": total_replaced,
                 },
-                "workflows": workflow_statuses,
+                "workflows": all_workflows,
             }
 
             # Write status report to input folder
-            report_path = input_folder / "output.json"
+            report_path = input_folder / "n8n-snap-job.json"
             with open(report_path, "w", encoding="utf-8") as f:
                 json.dump(status_report, f, indent=2)
             logger.info(f"Status report written to: {report_path}")
@@ -804,7 +911,7 @@ def render_workflows_parallel(
 
         if in_place:
             console.print(f"\n[bold cyan]Output:[/bold cyan] Images saved in source folders")
-            console.print(f"[bold cyan]Status report:[/bold cyan] {input_folder}/output.json")
+            console.print(f"[bold cyan]Status report:[/bold cyan] {input_folder}/n8n-snap-job.json")
         else:
             console.print(f"\n[bold cyan]Output folder:[/bold cyan] {output_folder}")
 

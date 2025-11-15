@@ -96,6 +96,11 @@ class WorkflowScanner:
 
         self.workflows = []
         for json_file in json_files:
+            # Skip n8n-snap state file
+            if json_file.name == "n8n-snap-job.json":
+                logger.debug(f"Skipping state file: {json_file.name}")
+                continue
+
             workflow = self._process_file(json_file)
             self.workflows.append(workflow)
 
