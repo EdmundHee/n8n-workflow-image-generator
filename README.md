@@ -276,11 +276,15 @@ Typical file sizes range from 100-350 KB depending on:
 
 ## How It Works
 
+This tool uses the official **[@n8n/demo](https://www.npmjs.com/package/@n8n/demo)** web component from n8n to render workflows. The component leverages n8n's cloud rendering service to visualize workflows accurately.
+
 1. **Flask Server** - Serves HTML page with n8n-demo web component
-2. **n8n-demo Component** - Official n8n workflow visualization component
+2. **n8n-demo Component** - Official n8n workflow visualization component ([@n8n/demo](https://www.npmjs.com/package/@n8n/demo))
 3. **Playwright Browser** - Launches headless Chromium to render workflows
 4. **Screenshot Capture** - Captures iframe content at specified dimensions
-5. **PNG Output** - Saves high-quality PNG to output folder
+5. **PNG Output** - Saves high-quality PNG images
+
+> **Note:** This project is not officially affiliated with n8n. It uses the publicly available n8n-demo component for workflow rendering.
 
 ### Architecture
 
@@ -391,11 +395,70 @@ n8n-snap --help
 
 ## License
 
-[Add your license here]
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+### Third-Party Components
+
+This project uses the following third-party components:
+- **[@n8n/demo](https://www.npmjs.com/package/@n8n/demo)** - Official n8n workflow visualization component (Apache 2.0 License)
+- Workflow rendering is powered by n8n's cloud rendering service
+
+> **Disclaimer:** This project is not officially affiliated with or endorsed by n8n. It is an independent tool that uses publicly available n8n components.
 
 ## Contributing
 
-[Add contribution guidelines here]
+Contributions are welcome! Here's how you can help:
+
+### Getting Started
+
+1. **Fork the repository**
+   ```bash
+   git fork https://github.com/yourusername/n8n-snap.git
+   ```
+
+2. **Create a feature branch**
+   ```bash
+   git checkout -b feature/your-feature-name
+   ```
+
+3. **Make your changes**
+   - Follow the existing code style
+   - Add tests if applicable
+   - Update documentation as needed
+
+4. **Test your changes**
+   ```bash
+   # Run the tool locally
+   pip install -e .
+   n8n-snap generate examples/ --in-place
+   ```
+
+5. **Commit your changes**
+   ```bash
+   git commit -m "Add: description of your changes"
+   ```
+
+6. **Push and create a Pull Request**
+   ```bash
+   git push origin feature/your-feature-name
+   ```
+
+### Guidelines
+
+- **Code Quality**: Ensure code is clean, well-commented, and follows Python best practices
+- **Documentation**: Update README.md for any new features or changes
+- **Testing**: Test your changes with various workflow files
+- **Commit Messages**: Use clear, descriptive commit messages
+- **Issues**: Feel free to open issues for bugs, features, or questions
+
+### Areas for Contribution
+
+- 🐛 Bug fixes and improvements
+- ✨ New features (e.g., additional output formats, filtering options)
+- 📚 Documentation improvements
+- 🧪 Test coverage
+- 🎨 UI/UX improvements for CLI output
+- ⚡ Performance optimizations
 
 ---
 
