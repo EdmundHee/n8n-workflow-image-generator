@@ -13,15 +13,17 @@ Generate high-quality PNG snapshots of n8n workflows using Python and Playwright
 
 ## Prerequisites
 
-- Python 3.8 or higher
+- Python 3.9 or higher
+- ~300MB disk space (for Playwright browser binaries)
 - Internet connection (workflows render via n8n cloud service)
 
 ## Installation
 
-### 1. Navigate to Project Directory
+### 1. Clone the Repository
 
 ```bash
-cd /Users/edmundhee/Work/GitHub/n8nspace/n8n-snap/python-n8n-snap
+git clone https://github.com/n8n-io/n8n-snap.git
+cd n8n-snap
 ```
 
 ### 2. Create and Activate Virtual Environment
@@ -36,21 +38,36 @@ source venv/bin/activate  # On macOS/Linux
 venv\Scripts\activate     # On Windows
 ```
 
-### 3. Install Dependencies
+### 3. Install the Package
 
 ```bash
-# Install Python packages
-pip install -r requirements.txt
-
-# Install Playwright browsers
-playwright install chromium
-```
-
-### 4. Install the Package
-
-```bash
+# Install package with all dependencies (editable mode for development)
 pip install -e .
 ```
+
+> **Note:** Use `pip install .` for a regular installation, or `pip install -e .` for an editable/development installation where code changes are immediately reflected.
+
+### 4. Install Playwright Browsers
+
+Playwright requires browser binaries to render workflows. Install Chromium (recommended):
+
+```bash
+# Install Chromium browser (recommended - ~300MB download)
+playwright install chromium
+
+# Alternatively, install all browsers (Chromium, Firefox, WebKit)
+playwright install
+
+# Or install with system dependencies (Linux users)
+playwright install --with-deps chromium
+```
+
+**Verify installation:**
+```bash
+playwright --version
+```
+
+> **Why Playwright?** n8n-snap uses Playwright to automate headless Chromium for rendering workflows. The browser binaries are separate from the Python package and must be installed manually.
 
 ## Quick Start
 
