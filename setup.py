@@ -24,6 +24,7 @@ setup(
         "click==8.1.7",
         "rich==13.7.0",
         "pydantic==2.5.0",
+        "psutil==5.9.6",
     ],
     entry_points={
         "console_scripts": [

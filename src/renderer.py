@@ -1,5 +1,6 @@
 """Playwright renderer module for capturing n8n workflow screenshots."""
 
+import asyncio
 import json
 import logging
 import time

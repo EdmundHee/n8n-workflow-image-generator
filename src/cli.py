@@ -2,14 +2,18 @@
 
 import asyncio
 import logging
+import multiprocessing
+import os
 import sys
 import threading
 import time
 from pathlib import Path
 from typing import Optional
+from functools import partial
 
 import click
-from rich.console import Console
+import psutil
+from rich.console import Console, Group
 from rich.table import Table
 from rich.progress import (
     Progress,
@@ -21,10 +25,12 @@ from rich.progress import (
 )
 from rich.panel import Panel
 from rich.logging import RichHandler
+from rich.live import Live
 
 from src.scanner import WorkflowScanner
 from src.renderer import WorkflowRenderer
 from src.server import create_server
+from src.worker import render_workflow_worker, WorkflowTask, WorkflowResult
 
 # Initialize Rich console
 console = Console()
@@ -166,6 +172,7 @@ def scan(input_folder: Path, recursive: bool, verbose: bool):
 @click.option("--timeout", default=30, type=int, help="Render timeout in seconds (default: 30)")
 @click.option("--wait-time", default=25, type=int, help="Wait time for iframe rendering in seconds (default: 25)")
 @click.option("--port", default=5000, type=int, help="Flask server port (default: 5000)")
+@click.option("--workers", default=1, type=int, help="Number of parallel workers (default: 1, max: cpu_count)")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 def generate(
     input_folder: Path,
@@ -177,6 +184,7 @@ def generate(
     timeout: int,
     wait_time: int,
     port: int,
+    workers: int,
     verbose: bool,
 ):
     """Generate PNG snapshots from workflow JSON files.
@@ -191,16 +199,43 @@ def generate(
     if square:
         width = height = 2560
 
+    # Validate and configure workers
+    cpu_count = os.cpu_count() or 1
+
+    # Validate worker count
+    if workers < 1:
+        console.print("[red]Error: --workers must be at least 1[/red]")
+        sys.exit(1)
+
+    if workers > cpu_count:
+        console.print(f"[yellow]Warning: Requested {workers} workers exceeds CPU count ({cpu_count}). Using {cpu_count} workers.[/yellow]")
+        workers = cpu_count
+
+    # Memory check
+    available_memory_gb = psutil.virtual_memory().available / (1024**3)
+    estimated_memory_per_worker_gb = 0.4  # ~400MB per browser instance
+    estimated_total_memory_gb = workers * estimated_memory_per_worker_gb
+
+    if estimated_total_memory_gb > available_memory_gb * 0.8:  # Warning if using >80% available memory
+        console.print(
+            f"[yellow]Warning: {workers} workers may use ~{estimated_total_memory_gb:.1f}GB memory. "
+            f"Available: {available_memory_gb:.1f}GB[/yellow]"
+        )
+
     # Build viewport description
     viewport_desc = f"Viewport: {width}x{height} @ 2x scale"
     if dark_mode:
         viewport_desc += " (dark mode)"
 
+    # Build worker description
+    worker_mode = "single worker" if workers == 1 else f"{workers} parallel workers"
+
     console.print(Panel.fit(
         f"[bold cyan]n8n Workflow Snapshot Generator[/bold cyan]\n"
         f"Input: {input_folder}\n"
         f"Output: {output_folder}\n"
-        f"{viewport_desc}",
+        f"{viewport_desc}\n"
+        f"Mode: {worker_mode}",
         border_style="cyan"
     ))
 
@@ -222,9 +257,24 @@ def generate(
         server_thread = run_server_thread(port=port)
         console.print(f"[green]✓[/green] Server running on http://127.0.0.1:{port}\n")
 
-        # Run async rendering
-        asyncio.run(
-            render_workflows_async(
+        # Choose rendering mode based on worker count
+        if workers == 1:
+            # Single worker - use original async rendering
+            asyncio.run(
+                render_workflows_async(
+                    valid_workflows,
+                    output_folder,
+                    width,
+                    height,
+                    timeout,
+                    wait_time,
+                    port,
+                    dark_mode,
+                )
+            )
+        else:
+            # Multiple workers - use parallel rendering
+            render_workflows_parallel(
                 valid_workflows,
                 output_folder,
                 width,
@@ -233,8 +283,8 @@ def generate(
                 wait_time,
                 port,
                 dark_mode,
+                workers,
             )
-        )
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user[/yellow]")
@@ -351,6 +401,217 @@ async def render_workflows_async(
 
     finally:
         await renderer.close()
+
+
+def render_workflows_parallel(
+    workflows: list,
+    output_folder: Path,
+    width: int,
+    height: int,
+    timeout: int,
+    wait_time: int,
+    port: int,
+    dark_mode: bool,
+    workers: int,
+):
+    """Render workflows using parallel workers with resource monitoring.
+
+    Args:
+        workflows: List of valid WorkflowFile objects
+        output_folder: Output directory path
+        width: Viewport width
+        height: Viewport height
+        timeout: Timeout in seconds
+        wait_time: Wait time for iframe in seconds
+        port: Server port number
+        dark_mode: Enable dark mode background
+        workers: Number of parallel workers
+    """
+    # Create output folder
+    output_folder.mkdir(parents=True, exist_ok=True)
+
+    # Create tasks for all workflows
+    tasks = []
+    for workflow in workflows:
+        output_filename = f"{workflow.safe_filename}.png"
+        output_path = output_folder / output_filename
+
+        task = WorkflowTask(
+            workflow_data=workflow.workflow_data,
+            workflow_name=workflow.name,
+            safe_filename=workflow.safe_filename,
+            output_path=output_path,
+        )
+        tasks.append(task)
+
+    # Prepare worker arguments
+    server_url = f"http://127.0.0.1:{port}"
+
+    # Create partial function with fixed parameters
+    worker_func = partial(
+        render_workflow_worker,
+        server_url=server_url,
+        width=width,
+        height=height,
+        timeout=timeout,
+        wait_time=wait_time,
+        dark_mode=dark_mode,
+    )
+
+    # Initialize results
+    results = {
+        "successful": 0,
+        "failed": 0,
+        "errors": [],
+    }
+
+    # Track worker statuses
+    worker_status = {i: {"workflow": None, "status": "idle"} for i in range(workers)}
+    worker_status_lock = threading.Lock()
+
+    try:
+        # Setup progress bar
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeRemainingColumn(),
+            console=console,
+            auto_refresh=False,  # Disable auto-refresh since Live will handle it
+        )
+
+        task = progress.add_task(
+            "[cyan]Rendering workflows...",
+            total=len(workflows)
+        )
+
+        # Create grouped display (worker status + progress)
+        def make_worker_status_panel():
+            """Create worker status panel."""
+            status_lines = []
+            with worker_status_lock:
+                for worker_id in range(workers):
+                    worker_info = worker_status[worker_id]
+                    if worker_info["status"] == "idle":
+                        status_lines.append(f"  [dim]Worker {worker_id}: Idle[/dim]")
+                    elif worker_info["status"] == "rendering":
+                        workflow_name = worker_info["workflow"]
+                        if len(workflow_name) > 40:
+                            workflow_name = workflow_name[:37] + "..."
+                        status_lines.append(f"  [cyan]Worker {worker_id}:[/cyan] [yellow]Rendering[/yellow] {workflow_name}")
+                    elif worker_info["status"] == "completed":
+                        workflow_name = worker_info["workflow"]
+                        if len(workflow_name) > 40:
+                            workflow_name = workflow_name[:37] + "..."
+                        status_lines.append(f"  [cyan]Worker {worker_id}:[/cyan] [green]✓[/green] {workflow_name}")
+
+            return Panel(
+                "\n".join(status_lines) if status_lines else "[dim]No workers active[/dim]",
+                title="Worker Status",
+                border_style="blue",
+            )
+
+        def make_display():
+            return Group(
+                make_worker_status_panel(),
+                progress
+            )
+
+        # Use Live display for continuous updates
+        with Live(make_display(), console=console, refresh_per_second=4) as live:
+            # Create multiprocessing pool and process workflows
+            with multiprocessing.Pool(processes=workers) as pool:
+                # Submit all tasks asynchronously
+                pending_results = []
+                task_to_worker = {}  # Map async_result to (worker_id, workflow_name)
+
+                for i, workflow_task in enumerate(tasks):
+                    worker_id = i % workers
+                    async_result = pool.apply_async(
+                        worker_func,
+                        args=(workflow_task, worker_id)
+                    )
+                    pending_results.append(async_result)
+
+                    # Track worker assignment
+                    task_to_worker[id(async_result)] = (worker_id, workflow_task.workflow_name)
+
+                    # Update worker status
+                    with worker_status_lock:
+                        worker_status[worker_id] = {
+                            "workflow": workflow_task.workflow_name,
+                            "status": "rendering"
+                        }
+
+                # Trigger initial display update to show worker assignments
+                live.update(make_display())
+
+                # Collect results as they complete (check for ready results)
+                while pending_results:
+                    completed_this_iteration = False
+
+                    # Find completed results
+                    for async_result in pending_results[:]:  # Copy list to allow removal during iteration
+                        if async_result.ready():
+                            # Get the result
+                            result = async_result.get()
+                            pending_results.remove(async_result)
+                            completed_this_iteration = True
+
+                            # Get worker info for this task
+                            worker_id, workflow_name = task_to_worker.get(id(async_result), (None, None))
+
+                            # Update results
+                            if result.success:
+                                results["successful"] += 1
+                            else:
+                                results["failed"] += 1
+                                results["errors"].append({
+                                    "workflow": result.workflow_name,
+                                    "error": result.error or "Unknown error",
+                                })
+
+                            # Update worker status
+                            if worker_id is not None:
+                                with worker_status_lock:
+                                    worker_status[worker_id] = {
+                                        "workflow": workflow_name,
+                                        "status": "completed"
+                                    }
+
+                            # Update progress
+                            completed_count = results["successful"] + results["failed"]
+                            progress.update(
+                                task,
+                                advance=1,
+                                description=f"[cyan]Rendering workflows... ({completed_count}/{len(workflows)})",
+                            )
+
+                            # Update display with fresh worker status and progress
+                            live.update(make_display())
+
+                    # Refresh display periodically even if no results ready
+                    if not completed_this_iteration and pending_results:
+                        live.update(make_display())
+                        time.sleep(0.1)
+
+        # Print results
+        console.print("\n[bold]Results:[/bold]")
+        console.print(f"  [green]✓ {results['successful']} workflows processed successfully[/green]")
+
+        if results["failed"] > 0:
+            console.print(f"  [red]✗ {results['failed']} workflows failed[/red]")
+
+            console.print("\n[bold red]Errors:[/bold red]")
+            for error in results["errors"]:
+                console.print(f"  [red]✗[/red] {error['workflow']}: {error['error']}")
+
+        console.print(f"\n[bold cyan]Output folder:[/bold cyan] {output_folder}")
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted by user - cleaning up workers...[/yellow]")
+        raise
 
 
 @cli.command()
