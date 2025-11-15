@@ -422,30 +422,118 @@ async def render_workflows_async(
 
     try:
         # Setup progress bar
-        with Progress(
+        progress = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TaskProgressColumn(),
             TimeRemainingColumn(),
             console=console,
-        ) as progress:
+            auto_refresh=False,
+        )
 
-            task = progress.add_task(
-                "[cyan]Rendering workflows...",
-                total=len(workflows_to_process)
+        task = progress.add_task(
+            "[cyan]Rendering workflows...",
+            total=len(workflows_to_process)
+        )
+
+        # Initialize results and status tracking
+        start_time = datetime.now(timezone.utc)
+        results = {
+            "successful": 0,
+            "failed": 0,
+            "errors": [],
+            "replaced_existing": 0,
+        }
+        workflow_statuses = []
+        current_workflow = {"name": "", "status": "", "start_time": None}
+
+        # Initialize CPU monitoring (first call returns 0, subsequent calls return actual values)
+        process = psutil.Process()
+        process.cpu_percent()  # Initialize CPU measurement
+
+        # Create live display components
+        def make_status_panel():
+            """Create current status panel."""
+            # Current workflow status
+            if current_workflow["name"]:
+                workflow_name = current_workflow["name"]
+                if len(workflow_name) > 60:
+                    workflow_name = workflow_name[:57] + "..."
+
+                status_emoji = {
+                    "rendering": "⏳",
+                    "success": "✓",
+                    "failed": "✗",
+                }.get(current_workflow["status"], "")
+
+                status_color = {
+                    "rendering": "yellow",
+                    "success": "green",
+                    "failed": "red",
+                }.get(current_workflow["status"], "white")
+
+                # Calculate elapsed time for current workflow
+                elapsed = ""
+                if current_workflow["start_time"] and current_workflow["status"] == "rendering":
+                    elapsed_seconds = (datetime.now(timezone.utc) - current_workflow["start_time"]).total_seconds()
+                    elapsed = f" [dim]({elapsed_seconds:.1f}s)[/dim]"
+
+                status_text = f"  [{status_color}]{status_emoji}[/{status_color}] {workflow_name}{elapsed}"
+            else:
+                status_text = "  [dim]Initializing...[/dim]"
+
+            # Statistics
+            completed = results["successful"] + results["failed"]
+            remaining = len(workflows_to_process) - completed
+
+            # Calculate ETA
+            eta_text = ""
+            if completed > 0 and remaining > 0:
+                elapsed_total = (datetime.now(timezone.utc) - start_time).total_seconds()
+                avg_time_per_workflow = elapsed_total / completed
+                eta_seconds = avg_time_per_workflow * remaining
+                eta_minutes = int(eta_seconds // 60)
+                eta_secs = int(eta_seconds % 60)
+                if eta_minutes > 0:
+                    eta_text = f"  [dim]ETA: {eta_minutes}m {eta_secs}s[/dim]"
+                else:
+                    eta_text = f"  [dim]ETA: {eta_secs}s[/dim]"
+
+            # Resource usage (use the initialized process instance)
+            memory_mb = process.memory_info().rss / (1024 * 1024)
+            cpu_percent = process.cpu_percent()
+
+            stats = (
+                f"  [green]✓ Success:[/green] {results['successful']}  "
+                f"[red]✗ Failed:[/red] {results['failed']}  "
+                f"[cyan]Remaining:[/cyan] {remaining}\n"
+                f"  [dim]Memory: {memory_mb:.1f} MB  CPU: {cpu_percent:.1f}%[/dim]{eta_text}"
             )
 
-            # Initialize results and status tracking
-            start_time = datetime.now(timezone.utc)
-            results = {
-                "successful": 0,
-                "failed": 0,
-                "errors": [],
-                "replaced_existing": 0,
-            }
-            workflow_statuses = []
+            return Panel(
+                f"{status_text}\n\n{stats}",
+                title="Current Status",
+                border_style="cyan",
+            )
 
+        def make_display():
+            return Group(
+                make_status_panel(),
+                progress
+            )
+
+        # Temporarily suppress console logging during Live display
+        # Save original log levels
+        saved_levels = {}
+        loggers_to_suppress = ['src.server', 'src.renderer', 'src.worker', '']  # '' is root logger
+        for logger_name in loggers_to_suppress:
+            lgr = logging.getLogger(logger_name)
+            saved_levels[logger_name] = lgr.level
+            lgr.setLevel(logging.CRITICAL)  # Only show critical errors
+
+        # Use Live display for continuous updates
+        with Live(make_display(), console=console, refresh_per_second=4) as live:
             for i, workflow in enumerate(workflows_to_process, 1):
                 workflow_start_time = datetime.now(timezone.utc)
                 status_entry = {
@@ -458,11 +546,19 @@ async def render_workflows_async(
                 }
 
                 try:
+                    # Update current workflow status
+                    current_workflow["name"] = workflow.name
+                    current_workflow["status"] = "rendering"
+                    current_workflow["start_time"] = datetime.now(timezone.utc)
+
                     # Update progress description
                     progress.update(
                         task,
-                        description=f"[cyan]Rendering {workflow.name[:40]}...",
+                        description=f"[cyan]Rendering workflows... ({i}/{len(workflows_to_process)})",
                     )
+
+                    # Refresh display
+                    live.update(make_display())
 
                     # Generate output path based on mode
                     output_filename = f"{workflow.safe_filename}.png"
@@ -491,9 +587,11 @@ async def render_workflows_async(
 
                     results["successful"] += 1
                     status_entry["status"] = "success"
+                    current_workflow["status"] = "success"
 
                 except Exception as e:
                     results["failed"] += 1
+                    current_workflow["status"] = "failed"
 
                     # Capture detailed error information
                     import traceback
@@ -530,6 +628,12 @@ async def render_workflows_async(
                     workflow_statuses.append(status_entry)
                     # Update progress
                     progress.update(task, advance=1)
+                    # Refresh display
+                    live.update(make_display())
+
+        # Restore original logging levels
+        for logger_name, level in saved_levels.items():
+            logging.getLogger(logger_name).setLevel(level)
 
         # Generate n8n-snap-job.json if in_place mode
         end_time = datetime.now(timezone.utc)
@@ -569,25 +673,41 @@ async def render_workflows_async(
                 json.dump(status_report, f, indent=2)
             logger.info(f"Status report written to: {report_path}")
 
-        # Print results
-        console.print("\n[bold]Results:[/bold]")
-        console.print(f"  [green]✓ {results['successful']} workflows processed successfully[/green]")
+        # Calculate total elapsed time
+        total_elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+        elapsed_minutes = int(total_elapsed // 60)
+        elapsed_seconds = int(total_elapsed % 60)
+
+        # Create summary panel
+        summary_lines = []
+        summary_lines.append(f"[green]✓ Success:[/green] {results['successful']}")
+        summary_lines.append(f"[red]✗ Failed:[/red] {results['failed']}")
 
         if results["replaced_existing"] > 0:
-            console.print(f"  [yellow]⟳ {results['replaced_existing']} existing images replaced[/yellow]")
+            summary_lines.append(f"[yellow]⟳ Replaced:[/yellow] {results['replaced_existing']}")
+
+        if elapsed_minutes > 0:
+            summary_lines.append(f"[cyan]⏱ Time:[/cyan] {elapsed_minutes}m {elapsed_seconds}s")
+        else:
+            summary_lines.append(f"[cyan]⏱ Time:[/cyan] {elapsed_seconds}s")
+
+        if in_place:
+            summary_lines.append(f"[dim]Output:[/dim] Images saved in source folders")
+            summary_lines.append(f"[dim]Report:[/dim] {input_folder}/n8n-snap-job.json")
+        else:
+            summary_lines.append(f"[dim]Output:[/dim] {output_folder}")
+
+        console.print("\n")
+        console.print(Panel(
+            "\n".join(summary_lines),
+            title="[bold]Summary[/bold]",
+            border_style="green" if results["failed"] == 0 else "yellow",
+        ))
 
         if results["failed"] > 0:
-            console.print(f"  [red]✗ {results['failed']} workflows failed[/red]")
-
             console.print("\n[bold red]Errors:[/bold red]")
             for error in results["errors"]:
                 console.print(f"  [red]✗[/red] {error['workflow']}: {error['error']}")
-
-        if in_place:
-            console.print(f"\n[bold cyan]Output:[/bold cyan] Images saved in source folders")
-            console.print(f"[bold cyan]Status report:[/bold cyan] {input_folder}/n8n-snap-job.json")
-        else:
-            console.print(f"\n[bold cyan]Output folder:[/bold cyan] {output_folder}")
 
     finally:
         await renderer.close()
@@ -709,8 +829,12 @@ def render_workflows_parallel(
     }
     workflow_statuses = []
 
+    # Initialize CPU monitoring (first call returns 0, subsequent calls return actual values)
+    process = psutil.Process()
+    process.cpu_percent()  # Initialize CPU measurement
+
     # Track worker statuses
-    worker_status = {i: {"workflow": None, "status": "idle"} for i in range(workers)}
+    worker_status = {i: {"workflow": None, "status": "idle", "start_time": None} for i in range(workers)}
     worker_status_lock = threading.Lock()
 
     try:
@@ -730,7 +854,7 @@ def render_workflows_parallel(
             total=len(workflows_to_process)
         )
 
-        # Create grouped display (worker status + progress)
+        # Create grouped display (worker status + progress + stats)
         def make_worker_status_panel():
             """Create worker status panel."""
             status_lines = []
@@ -743,7 +867,14 @@ def render_workflows_parallel(
                         workflow_name = worker_info["workflow"]
                         if len(workflow_name) > 40:
                             workflow_name = workflow_name[:37] + "..."
-                        status_lines.append(f"  [cyan]Worker {worker_id}:[/cyan] [yellow]Rendering[/yellow] {workflow_name}")
+
+                        # Calculate elapsed time
+                        elapsed = ""
+                        if worker_info.get("start_time"):
+                            elapsed_seconds = (datetime.now(timezone.utc) - worker_info["start_time"]).total_seconds()
+                            elapsed = f" [dim]({elapsed_seconds:.1f}s)[/dim]"
+
+                        status_lines.append(f"  [cyan]Worker {worker_id}:[/cyan] [yellow]⏳[/yellow] {workflow_name}{elapsed}")
                     elif worker_info["status"] == "completed":
                         workflow_name = worker_info["workflow"]
                         if len(workflow_name) > 40:
@@ -752,15 +883,62 @@ def render_workflows_parallel(
 
             return Panel(
                 "\n".join(status_lines) if status_lines else "[dim]No workers active[/dim]",
-                title="Worker Status",
+                title=f"Worker Status ({workers} workers)",
                 border_style="blue",
+            )
+
+        def make_stats_panel():
+            """Create statistics panel."""
+            completed = results["successful"] + results["failed"]
+            remaining = len(workflows_to_process) - completed
+
+            # Calculate ETA
+            eta_text = "Calculating..."
+            if completed > 0 and remaining > 0:
+                elapsed_total = (datetime.now(timezone.utc) - start_time).total_seconds()
+                avg_time_per_workflow = elapsed_total / completed
+                eta_seconds = avg_time_per_workflow * remaining
+                eta_minutes = int(eta_seconds // 60)
+                eta_secs = int(eta_seconds % 60)
+                if eta_minutes > 0:
+                    eta_text = f"{eta_minutes}m {eta_secs}s"
+                else:
+                    eta_text = f"{eta_secs}s"
+            elif remaining == 0:
+                eta_text = "Complete"
+
+            # Resource usage (use the initialized process instance)
+            memory_mb = process.memory_info().rss / (1024 * 1024)
+            cpu_percent = process.cpu_percent()
+
+            stats_text = (
+                f"  [green]✓ Success:[/green] {results['successful']}  "
+                f"[red]✗ Failed:[/red] {results['failed']}  "
+                f"[cyan]Remaining:[/cyan] {remaining}\n"
+                f"  [dim]Memory: {memory_mb:.1f} MB  CPU: {cpu_percent:.1f}%  ETA: {eta_text}[/dim]"
+            )
+
+            return Panel(
+                stats_text,
+                title="Statistics",
+                border_style="cyan",
             )
 
         def make_display():
             return Group(
                 make_worker_status_panel(),
+                make_stats_panel(),
                 progress
             )
+
+        # Temporarily suppress console logging during Live display
+        # Save original log levels
+        saved_levels = {}
+        loggers_to_suppress = ['src.server', 'src.renderer', 'src.worker', '']  # '' is root logger
+        for logger_name in loggers_to_suppress:
+            lgr = logging.getLogger(logger_name)
+            saved_levels[logger_name] = lgr.level
+            lgr.setLevel(logging.CRITICAL)  # Only show critical errors
 
         # Use Live display for continuous updates
         with Live(make_display(), console=console, refresh_per_second=4) as live:
@@ -785,7 +963,8 @@ def render_workflows_parallel(
                     with worker_status_lock:
                         worker_status[worker_id] = {
                             "workflow": workflow_task.workflow_name,
-                            "status": "rendering"
+                            "status": "rendering",
+                            "start_time": datetime.now(timezone.utc)
                         }
 
                 # Trigger initial display update to show worker assignments
@@ -857,6 +1036,10 @@ def render_workflows_parallel(
                         live.update(make_display())
                         time.sleep(0.1)
 
+        # Restore original logging levels
+        for logger_name, level in saved_levels.items():
+            logging.getLogger(logger_name).setLevel(level)
+
         # Generate n8n-snap-job.json if in_place mode
         end_time = datetime.now(timezone.utc)
         if in_place and input_folder:
@@ -895,25 +1078,46 @@ def render_workflows_parallel(
                 json.dump(status_report, f, indent=2)
             logger.info(f"Status report written to: {report_path}")
 
-        # Print results
-        console.print("\n[bold]Results:[/bold]")
-        console.print(f"  [green]✓ {results['successful']} workflows processed successfully[/green]")
+        # Calculate total elapsed time
+        total_elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+        elapsed_minutes = int(total_elapsed // 60)
+        elapsed_seconds = int(total_elapsed % 60)
+
+        # Create summary panel
+        summary_lines = []
+        summary_lines.append(f"[green]✓ Success:[/green] {results['successful']}")
+        summary_lines.append(f"[red]✗ Failed:[/red] {results['failed']}")
 
         if results["replaced_existing"] > 0:
-            console.print(f"  [yellow]⟳ {results['replaced_existing']} existing images replaced[/yellow]")
+            summary_lines.append(f"[yellow]⟳ Replaced:[/yellow] {results['replaced_existing']}")
+
+        if elapsed_minutes > 0:
+            summary_lines.append(f"[cyan]⏱ Time:[/cyan] {elapsed_minutes}m {elapsed_seconds}s")
+        else:
+            summary_lines.append(f"[cyan]⏱ Time:[/cyan] {elapsed_seconds}s")
+
+        # Add throughput stats for parallel mode
+        if total_elapsed > 0:
+            workflows_per_min = (results['successful'] + results['failed']) / (total_elapsed / 60)
+            summary_lines.append(f"[dim]Throughput:[/dim] {workflows_per_min:.1f} workflows/min")
+
+        if in_place:
+            summary_lines.append(f"[dim]Output:[/dim] Images saved in source folders")
+            summary_lines.append(f"[dim]Report:[/dim] {input_folder}/n8n-snap-job.json")
+        else:
+            summary_lines.append(f"[dim]Output:[/dim] {output_folder}")
+
+        console.print("\n")
+        console.print(Panel(
+            "\n".join(summary_lines),
+            title="[bold]Summary[/bold]",
+            border_style="green" if results["failed"] == 0 else "yellow",
+        ))
 
         if results["failed"] > 0:
-            console.print(f"  [red]✗ {results['failed']} workflows failed[/red]")
-
             console.print("\n[bold red]Errors:[/bold red]")
             for error in results["errors"]:
                 console.print(f"  [red]✗[/red] {error['workflow']}: {error['error']}")
-
-        if in_place:
-            console.print(f"\n[bold cyan]Output:[/bold cyan] Images saved in source folders")
-            console.print(f"[bold cyan]Status report:[/bold cyan] {input_folder}/n8n-snap-job.json")
-        else:
-            console.print(f"\n[bold cyan]Output folder:[/bold cyan] {output_folder}")
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user - cleaning up workers...[/yellow]")

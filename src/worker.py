@@ -60,12 +60,13 @@ def render_workflow_worker(
         WorkflowResult with success status and any error information
     """
     # Set up logging for this worker process
+    # Use a null handler to suppress console output during parallel execution
+    # Errors will still be captured in the WorkflowResult
     logging.basicConfig(
-        level=logging.INFO,
-        format=f'[Worker-{worker_id}] %(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        level=logging.ERROR,  # Only log errors, not info messages
+        format=f'[Worker-{worker_id}] %(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[logging.NullHandler()]  # Suppress output to console
     )
-
-    logger.info(f"Worker {worker_id} starting to render: {task.workflow_name}")
 
     try:
         # Run the async rendering in this process
@@ -82,7 +83,7 @@ def render_workflow_worker(
         return result
 
     except Exception as e:
-        logger.error(f"Worker {worker_id} failed to render {task.workflow_name}: {e}")
+        # Error is captured in WorkflowResult for reporting
         return WorkflowResult(
             workflow_name=task.workflow_name,
             output_path=task.output_path,
@@ -125,7 +126,6 @@ async def _render_workflow_async(
                 wait_time=wait_time * 1000,  # Convert to milliseconds
             )
 
-            logger.info(f"Worker {worker_id} successfully rendered: {task.workflow_name}")
             return WorkflowResult(
                 workflow_name=task.workflow_name,
                 output_path=task.output_path,
@@ -134,7 +134,6 @@ async def _render_workflow_async(
             )
 
     except RenderError as e:
-        logger.error(f"Worker {worker_id} render error for {task.workflow_name}: {e}")
         return WorkflowResult(
             workflow_name=task.workflow_name,
             output_path=task.output_path,
@@ -143,7 +142,6 @@ async def _render_workflow_async(
             worker_id=worker_id,
         )
     except Exception as e:
-        logger.error(f"Worker {worker_id} unexpected error for {task.workflow_name}: {e}")
         return WorkflowResult(
             workflow_name=task.workflow_name,
             output_path=task.output_path,
