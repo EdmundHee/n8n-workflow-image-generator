@@ -24,7 +24,7 @@ class WorkflowNode(BaseModel):
 class WorkflowData(BaseModel):
     """Model for workflow validation."""
 
-    name: str
+    name: Optional[str] = None  # Optional - will be auto-generated from filename if missing
     nodes: List[WorkflowNode] = Field(min_length=1)
     connections: Dict[str, Any] = Field(default_factory=dict)
     active: bool = True
@@ -122,6 +122,12 @@ class WorkflowScanner:
             # Read JSON file
             with open(file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+
+            # Auto-generate name from filename if missing
+            if "name" not in data or not data["name"]:
+                auto_generated_name = file_path.stem
+                data["name"] = auto_generated_name
+                logger.info(f"Auto-generated workflow name '{auto_generated_name}' for {file_path.name}")
 
             # Validate workflow structure
             workflow_data = WorkflowData(**data)

@@ -19,6 +19,7 @@ class WorkflowTask:
     workflow_name: str
     safe_filename: str
     output_path: Path
+    display_name: Optional[str] = None  # Includes folder path for display
 
 
 @dataclass

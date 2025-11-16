@@ -197,8 +197,8 @@ def scan(input_folder: Path, recursive: bool, verbose: bool):
 @click.option("--dark-mode", is_flag=True, help="Enable dark mode background")
 @click.option("--in-place", is_flag=True, help="Save images in same folder as source JSON files")
 @click.option("--force", is_flag=True, help="Force re-render of all workflows, ignoring previous state")
-@click.option("--timeout", default=30, type=int, help="Render timeout in seconds (default: 30)")
-@click.option("--wait-time", default=25, type=int, help="Wait time for iframe rendering in seconds (default: 25)")
+@click.option("--timeout", default=120, type=int, help="Render timeout in seconds (default: 120)")
+@click.option("--wait-time", default=60, type=int, help="Wait time for iframe rendering in seconds (default: 60)")
 @click.option("--port", default=5000, type=int, help="Flask server port (default: 5000)")
 @click.option("--workers", default=1, type=int, help="Number of parallel workers (default: 1, max: cpu_count)")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
@@ -787,15 +787,20 @@ def render_workflows_parallel(
         if in_place:
             # Save in same folder as source JSON
             output_path = workflow.path.parent / output_filename
+            # Create display name with folder path
+            relative_path = workflow.path.relative_to(input_folder)
+            display_name = f"{relative_path.parent.name}/{workflow.name}" if relative_path.parent.name else workflow.name
         else:
             # Save in output folder
             output_path = output_folder / output_filename
+            display_name = workflow.name
 
         task = WorkflowTask(
             workflow_data=workflow.workflow_data,
             workflow_name=workflow.name,
             safe_filename=workflow.safe_filename,
             output_path=output_path,
+            display_name=display_name,
         )
         tasks.append(task)
 
@@ -962,7 +967,7 @@ def render_workflows_parallel(
                     # Update worker status
                     with worker_status_lock:
                         worker_status[worker_id] = {
-                            "workflow": workflow_task.workflow_name,
+                            "workflow": workflow_task.display_name or workflow_task.workflow_name,
                             "status": "rendering",
                             "start_time": datetime.now(timezone.utc)
                         }
